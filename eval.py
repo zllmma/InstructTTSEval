@@ -19,7 +19,6 @@ import os
 import json
 import time
 import argparse
-import re
 import logging
 import base64
 from tqdm import tqdm
@@ -29,13 +28,9 @@ from openai import OpenAI
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    filename='qwen_eval.log',
+    filename='eval.log',
     filemode='a'
 )
-
-# Qwen3-Omni Thinking 模型的推理标签
-THINK_START = "<think>"
-THINK_END = "</think>"
 
 
 def parse_args():
@@ -59,63 +54,33 @@ def load_template(path: str) -> str:
         return f.read()
 
 
-def strip_thinking(text: str) -> str:
-    """移除 Qwen3-Omni Thinking 模型的  response 标签及内容"""
-    while THINK_START in text and THINK_END in text:
-        start = text.find(THINK_START)
-        end = text.find(THINK_END) + len(THINK_END)
-        text = text[:start] + text[end:]
-    return text.strip()
-
-
 def extract_json_from_text(text):
-    """从文本中提取 JSON 对象，支持多种格式的回退解析"""
-    # 先剥离推理标签
-    text = strip_thinking(text)
-    logging.info(f"原始响应内容（已去推理标签）:\n{text}")
+    """从模型响应中提取 JSON 对象。Qwen3-Omni 返回纯净 JSON，直接解析即可。"""
+    logging.info(f"原始响应内容:\n{text}")
 
-    # 方法 1：JSON 包裹在 markdown 代码块中
-    try:
-        if "```json" in text and "```" in text:
-            json_text = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
-            if json_text:
-                parsed = json.loads(json_text.group(1))
-                logging.info(f"方法 1 提取成功: {parsed}")
-                return parsed
-    except Exception as e:
-        logging.warning(f"方法 1 提取失败: {e}")
-
-    # 方法 2：正则匹配 JSON 对象
-    try:
-        json_pattern = re.compile(r'\{(?:[^{}]|"(?:\\.|[^"\\])*")*\}')
-        matches = json_pattern.findall(text)
-        for match in matches:
-            try:
-                parsed = json.loads(match)
-                if '一致性' in parsed:
-                    logging.info(f"方法 2 提取成功: {parsed}")
-                    return parsed
-            except Exception:
-                continue
-    except Exception as e:
-        logging.warning(f"方法 2 提取失败: {e}")
-
-    # 方法 3：直接解析整个文本
     try:
         parsed = json.loads(text.strip())
-        logging.info(f"方法 3 提取成功: {parsed}")
-        return parsed
-    except Exception as e:
-        logging.warning(f"方法 3 提取失败: {e}")
+        if '一致性' in parsed:
+            logging.info(f"JSON 解析成功: {parsed}")
+            return parsed
+    except json.JSONDecodeError as e:
+        logging.error(f"JSON 解析失败: {e}")
 
-    logging.error("所有 JSON 提取方法均失败")
+    logging.error("未能从响应中提取有效的 JSON")
     return None
 
 
-def encode_audio_base64(audio_path: str) -> str:
-    """将音频文件编码为 base64 字符串"""
+def encode_audio_base64(audio_path: str) -> dict:
+    """将音频文件编码为 base64，返回 llama.cpp 兼容的音频数据 dict"""
+    # 从文件扩展名推断音频格式
+    ext = os.path.splitext(audio_path)[1].lower().lstrip('.')
+    format_map = {'wav': 'wav', 'mp3': 'mp3', 'flac': 'flac', 'ogg': 'ogg', 'm4a': 'mp4'}
+    audio_format = format_map.get(ext, 'wav')
+
     with open(audio_path, 'rb') as f:
-        return base64.b64encode(f.read()).decode('utf-8')
+        data = base64.b64encode(f.read()).decode('utf-8')
+
+    return {'data': data, 'format': audio_format}
 
 
 def score_with_prompt(client: OpenAI, model: str, prompt_text: str,
@@ -126,7 +91,7 @@ def score_with_prompt(client: OpenAI, model: str, prompt_text: str,
 
     # 预编码音频（只编码一次，重试时复用）
     try:
-        audio_base64 = encode_audio_base64(audio_path)
+        audio_input = encode_audio_base64(audio_path)
     except Exception as e:
         logging.error(f"音频文件编码失败 [{audio_path}]: {e}")
         return None
@@ -142,7 +107,7 @@ def score_with_prompt(client: OpenAI, model: str, prompt_text: str,
                         "role": "user",
                         "content": [
                             {"type": "text", "text": prompt_text},
-                            {"type": "input_audio", "input_audio": audio_base64},
+                            {"type": "input_audio", "input_audio": audio_input},
                         ],
                     }
                 ],

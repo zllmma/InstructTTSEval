@@ -2,3 +2,6 @@ pretrained/
 datasets/
 uv.lock
 AGENTS.md
+gen_wav/
+eval.log
+
