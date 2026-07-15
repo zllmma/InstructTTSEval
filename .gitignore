@@ -3,5 +3,7 @@ datasets/
 uv.lock
 AGENTS.md
 gen_wav/
+gt_wav/
 eval.log
+__pycache__/
 

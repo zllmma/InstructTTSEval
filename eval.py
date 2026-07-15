@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-使用本地 Qwen3-Omni 模型（通过 llama-server）评测 TTS 合成语音的风格一致性。
-- 从提示词文件加载模板（含占位符 <此处插入待评测的语音风格描述>）
-- 对每条记录和每种指令类型（APS/DSD/RP），将指令文本填入模板，调用本地模型评分
-- 从返回文本中解析 JSON，提取"一致性"字段（true/false）
-- 流式写入：每处理完一条立即写盘，防止数据丢失
+Evaluate style consistency of synthesized TTS speech using a local Qwen3-Omni model
+(via llama-server).
 
-用法示例：
+- Loads a prompt template from file (containing placeholder <此处插入待评测的语音风格描述>)
+- For each record and instruction type (APS/DSD/RP), fills instruction text into the
+  template and calls the local model for scoring
+- Parses JSON from the model response, extracting the "一致性" field (true/false)
+- Streaming write: each result is flushed to disk immediately after processing
+  to prevent data loss
+
+Usage:
 python eval.py \
   --input_jsonl   example_en.jsonl \
   --output_jsonl  example_en_score.jsonl \
@@ -24,7 +28,7 @@ import base64
 from tqdm import tqdm
 from openai import OpenAI
 
-# 日志配置
+# Logging config
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -34,45 +38,44 @@ logging.basicConfig(
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="使用本地 Qwen3-Omni 模型评测 TTS 语音风格一致性")
-    p.add_argument("--input_jsonl", required=True, help="输入 JSONL 文件路径")
-    p.add_argument("--output_jsonl", required=True, help="输出 JSONL 文件路径")
-    p.add_argument("--prompt_file", required=True, help="包含占位符的提示词模板文件路径")
+    p = argparse.ArgumentParser(description="Evaluate TTS speech style consistency with local Qwen3-Omni")
+    p.add_argument("--input_jsonl", required=True, help="Path to input JSONL file")
+    p.add_argument("--output_jsonl", required=True, help="Path to output JSONL file")
+    p.add_argument("--prompt_file", required=True, help="Path to prompt template file (contains '<此处插入待评测的语音风格描述>' placeholder)")
     p.add_argument("--base_url", default="http://localhost:6677/v1",
-                   help="llama-server 的 OpenAI 兼容 API 地址（默认 http://localhost:6677/v1）")
+                   help="OpenAI-compatible API base URL for llama-server (default http://localhost:6677/v1)")
     p.add_argument("--model_name", default="qwen3-omni",
-                   help="模型名称（传给 API 的 model 参数，llama-server 通常忽略此值）")
+                   help="Model name parameter passed to the API (llama-server usually ignores this)")
     p.add_argument("--instruction_type", default="ALL",
                    choices=["APS", "DSD", "RP", "ALL"],
-                   help="只处理指定指令类型，ALL 表示处理全部三种")
+                   help="Process only the specified instruction type; ALL processes all three")
     return p.parse_args()
 
 
 def load_template(path: str) -> str:
-    """加载提示词模板"""
+    """Load the prompt template from file."""
     with open(path, 'r', encoding='utf-8') as f:
         return f.read()
 
 
 def extract_json_from_text(text):
-    """从模型响应中提取 JSON 对象。Qwen3-Omni 返回纯净 JSON，直接解析即可。"""
-    logging.info(f"原始响应内容:\n{text}")
+    """Extract JSON from model response. Qwen3-Omni returns clean JSON, so parse directly."""
+    logging.info(f"Raw response:\n{text}")
 
     try:
         parsed = json.loads(text.strip())
         if '一致性' in parsed:
-            logging.info(f"JSON 解析成功: {parsed}")
+            logging.info(f"JSON parsed successfully: {parsed}")
             return parsed
     except json.JSONDecodeError as e:
-        logging.error(f"JSON 解析失败: {e}")
+        logging.error(f"JSON decode error: {e}")
 
-    logging.error("未能从响应中提取有效的 JSON")
+    logging.error("Failed to extract valid JSON from response")
     return None
 
 
 def encode_audio_base64(audio_path: str) -> dict:
-    """将音频文件编码为 base64，返回 llama.cpp 兼容的音频数据 dict"""
-    # 从文件扩展名推断音频格式
+    """Encode audio file to base64, returning a llama.cpp-compatible audio dict."""
     ext = os.path.splitext(audio_path)[1].lower().lstrip('.')
     format_map = {'wav': 'wav', 'mp3': 'mp3', 'flac': 'flac', 'ogg': 'ogg', 'm4a': 'mp4'}
     audio_format = format_map.get(ext, 'wav')
@@ -85,20 +88,19 @@ def encode_audio_base64(audio_path: str) -> dict:
 
 def score_with_prompt(client: OpenAI, model: str, prompt_text: str,
                       audio_path: str, max_retries: int = 5):
-    """使用本地 Qwen3-Omni 模型对音频进行风格一致性评分"""
+    """Evaluate style consistency of an audio file using the local Qwen3-Omni model."""
     prompt_summary = prompt_text[:100] + "..." if len(prompt_text) > 100 else prompt_text
-    logging.info(f"准备处理音频: {audio_path}, 提示词摘要: {prompt_summary}")
+    logging.info(f"Preparing audio: {audio_path}, prompt preview: {prompt_summary}")
 
-    # 预编码音频（只编码一次，重试时复用）
     try:
         audio_input = encode_audio_base64(audio_path)
     except Exception as e:
-        logging.error(f"音频文件编码失败 [{audio_path}]: {e}")
+        logging.error(f"Audio encoding failed [{audio_path}]: {e}")
         return None
 
     for retry in range(max_retries):
         try:
-            logging.info(f"处理音频: {audio_path}, 第 {retry+1}/{max_retries} 次尝试")
+            logging.info(f"Processing audio: {audio_path}, attempt {retry+1}/{max_retries}")
 
             resp = client.chat.completions.create(
                 model=model,
@@ -119,33 +121,33 @@ def score_with_prompt(client: OpenAI, model: str, prompt_text: str,
             usage = resp.usage
 
             if retry != 0:
-                logging.info(f"第 {retry+1} 次尝试响应:\n{text}")
-                print(f"第 {retry+1} 次尝试响应:\n{text}")
-                print(f"音频路径: {audio_path}")
+                logging.info(f"Attempt {retry+1} response:\n{text}")
+                print(f"Attempt {retry+1} response:\n{text}")
+                print(f"Audio path: {audio_path}")
 
             ctx = f"[Audio: {audio_path}]"
-            logging.info(f"{ctx} API 返回原始文本: {text}")
+            logging.info(f"{ctx} API raw response: {text}")
 
             result = extract_json_from_text(text)
 
             if result and '一致性' in result:
-                logging.info(f"{ctx} 成功提取一致性: {result['一致性']}")
+                logging.info(f"{ctx} Successfully extracted consistency: {result['一致性']}")
                 return result['一致性']
 
-            logging.error(f"{ctx} 未能从文本中提取一致性字段: {text}")
+            logging.error(f"{ctx} Failed to extract consistency field: {text}")
             time.sleep(1)
 
         except Exception as e:
-            logging.error(f"[Audio: {audio_path}] 处理异常: {str(e)}")
+            logging.error(f"[Audio: {audio_path}] Exception: {str(e)}")
             time.sleep(2)
 
-    logging.error(f"经过 {max_retries} 次尝试仍无法获得评分结果")
+    logging.error(f"Failed to get a valid score after {max_retries} attempts")
     return None
 
 
 def process_single_item(item: dict, template: str, client: OpenAI,
                         model: str, instruction_type: str) -> dict:
-    """处理单条数据"""
+    """Process a single data item."""
     result = item.copy()
 
     instruction_types = (["APS", "DSD", "RP"] if instruction_type == "ALL"
@@ -160,28 +162,28 @@ def process_single_item(item: dict, template: str, client: OpenAI,
         audio_path = inst_data.get('gen_path')
 
         if not audio_path or not os.path.isfile(audio_path):
-            logging.warning(f"音频文件不存在: {audio_path}")
+            logging.warning(f"Audio file not found: {audio_path}")
             result[inst_type]['gemini_score'] = None
             continue
 
         if not instruction:
-            logging.warning(f"指令为空: {inst_type}")
+            logging.warning(f"Instruction is empty: {inst_type}")
             result[inst_type]['gemini_score'] = None
             continue
 
-        logging.info(f"处理 {inst_type} 类型, 指令: {instruction[:50]}...")
+        logging.info(f"Processing {inst_type}, instruction: {instruction[:50]}...")
         prompt_text = template.replace(
             '<此处插入待评测的语音风格描述>', instruction)
 
         score = score_with_prompt(client, model, prompt_text, audio_path)
-        logging.info(f"获得评分结果: {score}")
+        logging.info(f"Score obtained: {score}")
         result[inst_type]['gemini_score'] = score
 
     return result
 
 
 def calculate_statistics(results):
-    """计算 APS/DSD/RP 各项的评分统计"""
+    """Calculate scoring statistics for APS/DSD/RP."""
     stats = {
         'APS': {'total': 0, 'true_count': 0, 'null_count': 0},
         'DSD': {'total': 0, 'true_count': 0, 'null_count': 0},
@@ -217,71 +219,65 @@ def calculate_statistics(results):
 
 
 def print_statistics(stats):
-    """格式化输出统计数据"""
+    """Print formatted statistics."""
     print("\n" + "=" * 60)
-    print("评估统计")
+    print("Evaluation Statistics")
     print("=" * 60)
 
     for inst_type in ['APS', 'DSD', 'RP']:
         data = stats[inst_type]
         print(f"{inst_type:>8}: {data['percentage']:6.2f}% "
-              f"({data['true_count']:3d}/{data['valid_count']:3d} 有效, "
-              f"{data['null_count']:3d} 空)")
+              f"({data['true_count']:3d}/{data['valid_count']:3d} valid, "
+              f"{data['null_count']:3d} null)")
 
     valid_types = [t for t in ['APS', 'DSD', 'RP'] if stats[t]['valid_count'] > 0]
     if valid_types:
         macro_avg = sum(stats[t]['percentage'] for t in valid_types) / len(valid_types)
-        print(f"{'AVG':>8}: {macro_avg:6.2f}% (宏平均)")
+        print(f"{'AVG':>8}: {macro_avg:6.2f}% (macro average)")
 
     print("=" * 60)
 
-    logging.info("评估统计:")
+    logging.info("Evaluation statistics:")
     for inst_type in ['APS', 'DSD', 'RP']:
         data = stats[inst_type]
         logging.info(f"{inst_type}: {data['percentage']:.2f}% "
-                     f"({data['true_count']}/{data['valid_count']} 有效, "
-                     f"{data['null_count']} 空)")
+                     f"({data['true_count']}/{data['valid_count']} valid, "
+                     f"{data['null_count']} null)")
     if valid_types:
-        logging.info(f"AVG: {macro_avg:.2f}% (宏平均)")
+        logging.info(f"AVG: {macro_avg:.2f}% (macro average)")
 
 
 def main():
     args = parse_args()
-    logging.info(f"启动评测程序，参数: {vars(args)}")
+    logging.info(f"Starting evaluation, args: {vars(args)}")
 
-    # 加载提示词模板
     template = load_template(args.prompt_file)
-    logging.info(f"已加载提示词模板，长度: {len(template)} 字符")
+    logging.info(f"Prompt template loaded, length: {len(template)} chars")
 
-    # 读取输入数据
     with open(args.input_jsonl, 'r', encoding='utf-8') as fin:
         lines = fin.readlines()
-    logging.info(f"读取 {len(lines)} 条记录")
+    logging.info(f"Read {len(lines)} records")
 
     items = [json.loads(line) for line in lines]
-    logging.info(f"解析 {len(items)} 条数据")
+    logging.info(f"Parsed {len(items)} items")
 
-    # 初始化 OpenAI 客户端（指向本地 llama-server）
     client = OpenAI(base_url=args.base_url, api_key="not-needed")
 
-    # 单进程顺序处理 + 流式写入
     results = []
     with open(args.output_jsonl, 'w', encoding='utf-8', buffering=1) as fout:
-        for item in tqdm(items, desc="评分中"):
+        for item in tqdm(items, desc="Scoring"):
             try:
                 result = process_single_item(
                     item, template, client, args.model_name, args.instruction_type)
                 results.append(result)
             except Exception as e:
-                logging.error(f"处理条目失败: {str(e)}")
+                logging.error(f"Failed to process item: {str(e)}")
                 results.append(item)
-            # 每条结果立即落盘
             fout.write(json.dumps(results[-1], ensure_ascii=False) + '\n')
 
-    logging.info(f"处理完成，结果已保存至: {args.output_jsonl}")
-    logging.info(f"共处理 {len(results)} 条样本")
+    logging.info(f"Processing complete, results saved to: {args.output_jsonl}")
+    logging.info(f"Total samples processed: {len(results)}")
 
-    # 统计汇总
     stats = calculate_statistics(results)
     print_statistics(stats)
 

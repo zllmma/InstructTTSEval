@@ -1,69 +1,74 @@
-# InstructTTSEval — TTS 风格指令遵循能力评估
+# InstructTTSEval — TTS Style Instruction Following Evaluation
 
-使用大模型（Qwen3-Omni / llama.cpp）评测 TTS 合成语音的风格一致性，覆盖 12 个声学维度。任何 TTS 系统合成的音频均可评测。
+Evaluates style consistency of synthesized TTS speech using a large model (Qwen3-Omni), covering 12 acoustic dimensions. Audio synthesized by any TTS system can be evaluated.
 
-- **论文**: [arXiv 2506.16381](https://arxiv.org/abs/2506.16381)
-- **数据集**: [HuggingFace](https://huggingface.co/datasets/CaasiHUANG/InstructTTSEval)
-- **上游仓库**: [GitHub](https://github.com/KexinHUANG19/InstructTTSEval)
+- **Paper**: [arXiv 2506.16381](https://arxiv.org/abs/2506.16381)
+- **Dataset**: [HuggingFace](https://huggingface.co/datasets/CaasiHUANG/InstructTTSEval)
+- **Upstream repo**: [InstructTTSEval](https://github.com/KexinHUANG19/InstructTTSEval)
 
-## 环境配置
+## Setup
 
-### 1. 安装 Python 依赖
+### 1. Install Python dependencies
+
+Core dependencies (evaluation + ground truth extraction):
 
 ```bash
 uv sync
 ```
 
-### 2. 下载评测模型
+If you also need TTS synthesis with Qwen3-TTS, install with the `tts` extra:
 
-Qwen3-Omni GGUF 权重来自 [ggml-org/Qwen3-Omni-30B-A3B-Thinking-GGUF](https://huggingface.co/ggml-org/Qwen3-Omni-30B-A3B-Thinking-GGUF)，下载至 `pretrained/` 目录：
+```bash
+uv sync --extra tts
+```
+
+### 2. Download the evaluation model
+
+Qwen3-Omni GGUF weights from [ggml-org/Qwen3-Omni-30B-A3B-Thinking-GGUF](https://huggingface.co/ggml-org/Qwen3-Omni-30B-A3B-Thinking-GGUF), place under `pretrained/`:
 
 - `Qwen3-Omni-30B-A3B-Thinking-Q4_K_M.gguf`
 - `mmproj-Qwen3-Omni-30B-A3B-Thinking-bf16.gguf`
 
-### 3. 确保 llama 命令行可用
+### 3. Ensure the [llama](https://github.com/ggml-org/llama.cpp) CLI is available
+
+## Full Workflow
+
+### Step 1: Synthesize TTS audio
+
+Generate audio with any TTS system. For each sample, synthesize three audio files (one per instruction type: APS/DSD/RP) and organize them as JSONL.
+
+A reference synthesis script based on Qwen3-TTS is provided:
 
 ```bash
-# llama.cpp 需编译安装，llama serve 命令应在 PATH 中
-which llama
+uv run test_synthesize.py --split zh --num_samples 20
 ```
 
-## 完整流程
-
-### 步骤 1：TTS 合成音频
-
-用任意 TTS 系统生成音频，每条样本按三种指令类型（APS/DSD/RP）合成三个音频文件，整理为 JSONL 格式。
-
-项目中提供了基于 Qwen3-TTS 的合成脚本作为参考：
+### Step 2: Start llama serve
 
 ```bash
-# 编辑 test_synthesize.py 中的 NUM_SAMPLES 控制样本数量
-uv run test_synthesize.py
+./run_llama_server.sh
 ```
 
-### 步骤 2：评测
+The service runs in the foreground. Open another terminal to run evaluation.
+
+### Step 3: Run evaluation
 
 ```bash
-./run_eval.sh gen_wav/zh_20.jsonl gen_wav/zh_20_output.jsonl
+uv run eval.py --input_jsonl gen_wav/zh_20.jsonl --output_jsonl gen_wav/zh_20_output.jsonl --prompt_file eval_prompt.txt --instruction_type ALL
 ```
 
-脚本会自动启动 `llama serve`、等待就绪、运行评测、关闭服务。
+Default configuration can be overridden via environment variables:
 
-可通过环境变量覆盖默认配置：
+| Env variable | Default | Description |
+|-------------|---------|-------------|
+| `LLAMA_BIN` | `llama` | Path to llama binary |
+| `LLAMA_MODEL` | `pretrained/Qwen3-Omni-30B-A3B-Thinking-Q4_K_M.gguf` | Model path |
+| `LLAMA_MMPROJ` | `pretrained/mmproj-Qwen3-Omni-30B-A3B-Thinking-bf16.gguf` | Multimodal projector |
+| `LLAMA_PORT` | `6677` | Server port |
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `QWEN_BASE_URL` | `http://localhost:6677/v1` | API 地址 |
-| `QWEN_MODEL_NAME` | `qwen3-omni` | 模型名称 |
-| `QWEN_INSTRUCTION_TYPE` | `ALL` | 指令类型（APS/DSD/RP/ALL） |
-| `LLAMA_MODEL` | `pretrained/Qwen3-Omni-30B-A3B-Thinking-Q4_K_M.gguf` | 模型路径 |
-| `LLAMA_MMPROJ` | `pretrained/mmproj-Qwen3-Omni-30B-A3B-Thinking-bf16.gguf` | 多模态投影 |
-| `LLAMA_PORT` | `6677` | 服务端口 |
-| `PYTHON` | `.venv/bin/python` | Python 解释器 |
+## Data Format
 
-## 数据格式
-
-输入为 JSONL，每条记录包含 `id`、`text` 以及三种指令类型：
+Input is JSONL, each record contains `id`, `text`, and three instruction types:
 
 ```json
 {
@@ -84,23 +89,23 @@ uv run test_synthesize.py
 }
 ```
 
-- `instruction`：风格描述文本（三种类型 APS/DSD/RP）
-- `gen_path`：合成音频路径（相对路径）
-- 音频格式：WAV/MP3/FLAC 等
+- `instruction`: style description text (three types: APS/DSD/RP)
+- `gen_path`: path to synthesized audio (relative path)
+- Audio format: WAV/MP3/FLAC, etc.
 
-## 输出格式
+## Output Format
 
-评测脚本将 `true`/`false` 写入各指令的 `gemini_score` 字段，并输出统计：
+The evaluation script writes `true`/`false` into the `gemini_score` field of each instruction type, and outputs statistics:
 
 ```
 ============================================================
-评估统计
+Evaluation Statistics
 ============================================================
-     APS:  75.00% ( 15/ 20 有效,   0 空)
-     DSD:  95.00% ( 19/ 20 有效,   0 空)
-      RP:  85.00% ( 17/ 20 有效,   0 空)
-     AVG:  85.00% (宏平均)
+     APS:  75.00% ( 15/ 20 valid,   0 null)
+     DSD:  95.00% ( 19/ 20 valid,   0 null)
+      RP:  85.00% ( 17/ 20 valid,   0 null)
+     AVG:  85.00% (macro average)
 ============================================================
 ```
 
-日志同时写入 `eval.log` 和控制台。
+Logs are written to both `eval.log` and stdout.
